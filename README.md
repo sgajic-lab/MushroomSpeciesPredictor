@@ -65,7 +65,7 @@ notebook's first cell. In short:
 1. Create a new notebook on Kaggle and import this `.ipynb` file.
 2. Add the dataset above as an input.
 3. In the notebook settings, choose the **GPU T4 x2** accelerator and turn **Internet on**.
-4. Set `REPO_URL` to this repository, then use **Save Version → Save & Run All**.
+4. Use **Save Version → Save & Run All**. The notebook clones this repository automatically.
 
 The checkpoint and report appear in the version's **Output** tab.
 
