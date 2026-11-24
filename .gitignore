@@ -1,5 +1,22 @@
-# Ignore only dataset
-data/mushroom_species.csv
-
-# Entire dataset folder
+# datasets
 data/
+data_split/
+
+# training outputs
+checkpoints/
+reports/
+wandb/
+*.pt
+*.pth
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

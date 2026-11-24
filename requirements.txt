@@ -1,0 +1,6 @@
+torch>=2.3
+torchvision>=0.18
+numpy
+pillow
+matplotlib
+wandb  # optional: only needed with train.py --wandb
