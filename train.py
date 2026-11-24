@@ -41,6 +41,8 @@ def parse_args():
     ap.add_argument("--label-smoothing", type=float, default=0.1)
     ap.add_argument("--no-class-weights", action="store_true", help="disable imbalance-aware loss")
     ap.add_argument("--patience", type=int, default=5, help="early-stopping patience (epochs)")
+    ap.add_argument("--time-limit", type=float, default=None, metavar="HOURS",
+                    help="fit training into this many hours (shortens the schedule, keeps time for testing)")
     ap.add_argument("--img-size", type=int, default=224)
     ap.add_argument("--num-workers", type=int, default=None)
     ap.add_argument("--subset", type=int, default=None, help="use at most N images per class")
@@ -94,6 +96,7 @@ def train_one_epoch(model, loader, criterion, optimizer, scheduler, scaler, devi
 
 
 def main():
+    start_time = time.time()
     args = parse_args()
     seed_everything(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -139,11 +142,37 @@ def main():
     best_path = os.path.join(args.out, "best.pt")
     best_acc, best_epoch, bad_epochs = -1.0, 0, 0
 
+    limit = args.time_limit * 3600 if args.time_limit else None
+    planned = args.epochs
+    last_epoch_s = 0.0
+
+    def time_left():
+        return limit - (time.time() - start_time)
+
+    def reserve():
+        # time kept back for the final test evaluation and saving
+        return 0.5 * last_epoch_s + 300
+
     for epoch in range(1, args.epochs + 1):
+        if epoch > planned:
+            break
         if pretrained and epoch == freeze_epochs + 1 and freeze_epochs:
             set_backbone_trainable(model, args.arch, True)
-            optimizer, scheduler = start_phase(args.finetune_lr, args.epochs - freeze_epochs)
+            phase2 = args.epochs - freeze_epochs
+            if limit:
+                # full fine-tuning is slower per epoch than head-only training (up to ~2.5x on CPU);
+                # overestimating is safer: the cosine schedule then finishes inside the budget
+                est = 2.0 * last_epoch_s
+                fit = int((time_left() - reserve()) // est) if est else phase2
+                if fit < phase2:
+                    phase2 = max(1, fit)
+                    print(f"Time limit: planning {phase2} fine-tuning epochs (~{est / 60:.0f} min each)")
+            planned = freeze_epochs + phase2
+            optimizer, scheduler = start_phase(args.finetune_lr, phase2)
             print(f"Phase 2: fine-tuning all layers at lr={args.finetune_lr}")
+        elif limit and epoch > 1 and time_left() - reserve() < 1.15 * last_epoch_s:
+            print("Stopping: the next epoch would not finish within the time limit")
+            break
 
         t0 = time.time()
         train_loss, train_acc = train_one_epoch(
@@ -152,9 +181,11 @@ def main():
         val_loss = nn.functional.cross_entropy(logits, targets).item()
         val = summarize(logits, targets, classes)
 
-        print(f"Epoch {epoch:3d}/{args.epochs} | train loss {train_loss:.4f} acc {train_acc:6.2f}% "
+        last_epoch_s = time.time() - t0
+        print(f"Epoch {epoch:3d}/{planned} | train loss {train_loss:.4f} acc {train_acc:6.2f}% "
               f"| val loss {val_loss:.4f} acc {val['top1']:6.2f}% top-5 {val['top5']:6.2f}% "
-              f"balanced {val['balanced_acc']:6.2f}% | {time.time() - t0:.0f}s")
+              f"balanced {val['balanced_acc']:6.2f}% | {last_epoch_s:.0f}s "
+              f"| total {(time.time() - start_time) / 3600:.2f}h")
         if run:
             run.log({"epoch": epoch, "train_loss": train_loss, "train_accuracy": train_acc,
                      "val_loss": val_loss, "val_accuracy": val["top1"], "val_top5": val["top5"],

@@ -96,7 +96,7 @@ def load_datasets(split_dir, img_size=IMG_SIZE, subset=None):
 def class_weights(targets, num_classes, power=0.5):
     """Inverse-frequency loss weights, softened by ``power`` (0.5 = inverse sqrt).
 
-    The dataset is imbalanced (211 to 5,823 images per class), so
+    The dataset is heavily imbalanced (a handful to thousands of images per class), so
     without weights the model learns to favour the big classes.
     """
     counts = Counter(targets)

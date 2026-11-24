@@ -1,6 +1,7 @@
 # MushroomSpeciesPredictor
 
-An image classifier that predicts a mushroom's species from a photo across 169 species.
+An image classifier that predicts a mushroom's species from a photo (555 species in the
+current dataset).
 By default it fine-tunes an ImageNet-pretrained EfficientNet-B0. A small CNN trained
 from scratch is also available for comparison.
 
@@ -21,11 +22,13 @@ For GPU training, install the CUDA build of PyTorch from <https://pytorch.org/ge
 
 The data is the Kaggle dataset
 [`dariobaumberger/combined-kaggle-mushrooms-dataset`](https://www.kaggle.com/datasets/dariobaumberger/combined-kaggle-mushrooms-dataset).
-It has 169 species and about 104,000 images, in an `images/` folder with one subfolder
-per species. Split it 70/15/15 with a fixed seed:
+The current version on Kaggle has 555 species, some with only a handful of images.
+Version 2 had 169 species and about 104,000 images. The images are in an `images/` folder
+with one subfolder per species. Split them 70/15/15 with a fixed seed:
 
 ```bash
 python split_data.py path/to/raw_images --out data_split
+python split_data.py path/to/raw_images --out data_split --resize 256   # shrink once: faster epochs
 python eda.py --data data_split          # class counts + sample grid in reports/
 ```
 
@@ -45,13 +48,15 @@ The training recipe:
   all layers are fine-tuned at a lower learning rate.
 - **AdamW** with linear warmup and a cosine learning-rate schedule.
 - **Imbalance handling.** The loss uses class weights (inverse square root of class
-  frequency) plus label smoothing. The dataset ranges from 211 to 5,823 images per
-  class.
+  frequency) plus label smoothing, because class sizes vary widely.
 - **Augmentation that keeps color.** Random crops, flips and small rotations are used,
   with only a slight hue shift.
 - **Best checkpoint and early stopping.** The best epoch by validation accuracy is saved
   to `checkpoints/best.pt`, and training stops early when validation stops improving.
 - **Mixed precision** on CUDA GPUs.
+- **Optional time limit.** With `--time-limit HOURS`, the fine-tuning schedule is shortened to fit
+  the budget, and training stops early if the next epoch wouldn't finish. Time is kept back for
+  the final test evaluation.
 
 At the end of training, the best checkpoint is evaluated on the test set. Results go to
 `checkpoints/report/`: top-1, top-5, balanced accuracy, a per-class CSV, and a confusion
