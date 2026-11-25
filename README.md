@@ -32,6 +32,12 @@ python split_data.py path/to/raw_images --out data_split --resize 256   # shrink
 python eda.py --data data_split          # class counts + sample grid in reports/
 ```
 
+The dataset combines several sources that sometimes use an old and a current name for the same
+species, for example *Lycoperdon pyriforme* and *Apioperdon pyriforme*. `split_data.py` merges
+these synonyms into one class, and drops folders labelled only with a genus or family, such as
+*Pleurotus* or *Clavariaceae*. The full lists are `SYNONYMS` and `DROP` at the top of the file.
+Use `--keep-names` to turn this off.
+
 ## Train
 
 ```bash
