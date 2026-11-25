@@ -24,6 +24,7 @@ import torch.nn as nn
 
 from data import class_weights, load_datasets, make_loaders
 from evaluate import predict_all, print_summary, summarize, write_report
+from gpu_aug import GPUAugment
 from model import ARCHS, build_model, load_checkpoint, save_checkpoint, set_backbone_trainable
 
 
@@ -44,6 +45,8 @@ def parse_args():
     ap.add_argument("--time-limit", type=float, default=None, metavar="HOURS",
                     help="fit training into this many hours (shortens the schedule, keeps time for testing)")
     ap.add_argument("--img-size", type=int, default=224)
+    ap.add_argument("--aug", choices=["auto", "gpu", "cpu"], default="auto",
+                    help="where rotation/colour augmentation runs (auto: GPU when CUDA is available)")
     ap.add_argument("--num-workers", type=int, default=None)
     ap.add_argument("--subset", type=int, default=None, help="use at most N images per class")
     ap.add_argument("--seed", type=int, default=42)
@@ -74,12 +77,17 @@ def cosine_with_warmup(optimizer, total_steps, warmup_steps):
     return torch.optim.lr_scheduler.LambdaLR(optimizer, factor)
 
 
-def train_one_epoch(model, loader, criterion, optimizer, scheduler, scaler, device, use_amp):
+def train_one_epoch(model, loader, criterion, optimizer, scheduler, scaler, device, use_amp,
+                    prep=None, channels_last=False):
     model.train()
     total_loss, correct, seen = 0.0, 0, 0
     for inputs, targets in loader:
         inputs = inputs.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
+        if prep is not None:
+            inputs = prep(inputs)
+        if channels_last:
+            inputs = inputs.contiguous(memory_format=torch.channels_last)
         with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
             outputs = model(inputs)
             loss = criterion(outputs, targets)
@@ -102,9 +110,18 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = device.type == "cuda"
     torch.backends.cudnn.benchmark = True  # fixed input size, so let cuDNN pick the fastest kernels
-    print(f"Device: {device}  (mixed precision: {use_amp})")
+    gpu_aug = args.aug == "gpu" or (args.aug == "auto" and device.type == "cuda")
+    channels_last = device.type == "cuda"  # faster convolutions with float16 on tensor cores
+    print(f"Device: {device}  (mixed precision: {use_amp}, augmentation on {'GPU' if gpu_aug else 'CPU'})")
 
-    train_ds, val_ds, test_ds = load_datasets(args.data, args.img_size, args.subset)
+    prep_train = prep_eval = None
+    if gpu_aug:
+        aug = GPUAugment()
+        prep_train = lambda x: aug(x, train=True)   # noqa: E731
+        prep_eval = lambda x: aug(x, train=False)   # noqa: E731
+    eval_kw = dict(prep=prep_eval, amp=use_amp, channels_last=channels_last)
+
+    train_ds, val_ds, test_ds = load_datasets(args.data, args.img_size, args.subset, gpu_aug=gpu_aug)
     classes = train_ds.classes
     print(f"Train {len(train_ds)} | Val {len(val_ds)} | Test {len(test_ds)} | {len(classes)} classes")
     train_loader, val_loader, test_loader = make_loaders(
@@ -112,6 +129,8 @@ def main():
 
     pretrained = not args.no_pretrained and args.arch != "convnet"
     model = build_model(args.arch, len(classes), pretrained=pretrained).to(device)
+    if channels_last:
+        model = model.to(memory_format=torch.channels_last)
 
     weights = None if args.no_class_weights else class_weights(train_ds.targets, len(classes)).to(device)
     criterion = nn.CrossEntropyLoss(weight=weights, label_smoothing=args.label_smoothing)
@@ -176,8 +195,9 @@ def main():
 
         t0 = time.time()
         train_loss, train_acc = train_one_epoch(
-            model, train_loader, criterion, optimizer, scheduler, scaler, device, use_amp)
-        logits, targets = predict_all(model, val_loader, device)
+            model, train_loader, criterion, optimizer, scheduler, scaler, device, use_amp,
+            prep=prep_train, channels_last=channels_last)
+        logits, targets = predict_all(model, val_loader, device, **eval_kw)
         val_loss = nn.functional.cross_entropy(logits, targets).item()
         val = summarize(logits, targets, classes)
 
@@ -206,7 +226,9 @@ def main():
 
     print(f"\nBest val accuracy {best_acc:.2f}% at epoch {best_epoch}. Evaluating it on the test set...")
     model, _, _ = load_checkpoint(best_path, device)
-    logits, targets = predict_all(model, test_loader, device)
+    if channels_last:
+        model = model.to(memory_format=torch.channels_last)
+    logits, targets = predict_all(model, test_loader, device, **eval_kw)
     test = summarize(logits, targets, classes)
     print_summary(test, classes, "test")
     report = write_report(test, classes, os.path.join(args.out, "report"))

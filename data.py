@@ -13,10 +13,21 @@ IMAGENET_STD = [0.229, 0.224, 0.225]
 IMG_SIZE = 224
 
 
-def build_transforms(train, img_size=IMG_SIZE):
+def build_transforms(train, img_size=IMG_SIZE, gpu_aug=False):
     """Train: light augmentation that keeps colour intact (colour is a key
     feature for telling species apart). Eval: resize + centre crop, which
-    keeps the aspect ratio instead of squashing the image."""
+    keeps the aspect ratio instead of squashing the image.
+
+    With ``gpu_aug=True`` only the cheap, size-changing steps run here and the
+    result stays uint8; gpu_aug.GPUAugment does the rest on the GPU."""
+    if gpu_aug:
+        steps = [v2.ToImage()]
+        if train:
+            steps += [v2.RandomResizedCrop(img_size, scale=(0.5, 1.0), antialias=True),
+                      v2.RandomHorizontalFlip()]
+        else:
+            steps += [v2.Resize(int(img_size * 256 / 224), antialias=True), v2.CenterCrop(img_size)]
+        return v2.Compose(steps)
     if train:
         return v2.Compose([
             v2.ToImage(),
@@ -72,13 +83,25 @@ def _subset_per_class(dataset, n_per_class, seed=0):
     return sub
 
 
-def load_datasets(split_dir, img_size=IMG_SIZE, subset=None):
+def fast_loader(path):
+    """Decode straight to a uint8 tensor (libjpeg-turbo); fall back to PIL."""
+    try:
+        from torchvision.io import ImageReadMode, decode_image, read_file
+        return decode_image(read_file(path), mode=ImageReadMode.RGB)
+    except Exception:
+        from torchvision.datasets.folder import default_loader
+        return default_loader(path)
+
+
+def load_datasets(split_dir, img_size=IMG_SIZE, subset=None, gpu_aug=False):
     """Return (train, val, test) datasets that share the train class indices."""
-    train = ImageFolder(os.path.join(split_dir, "train"), transform=build_transforms(True, img_size))
+    extra = {"loader": fast_loader} if gpu_aug else {}
+    train = ImageFolder(os.path.join(split_dir, "train"),
+                        transform=build_transforms(True, img_size, gpu_aug), **extra)
     classes = train.classes
-    eval_tf = build_transforms(False, img_size)
-    val = FixedClassImageFolder(os.path.join(split_dir, "val"), classes, transform=eval_tf)
-    test = FixedClassImageFolder(os.path.join(split_dir, "test"), classes, transform=eval_tf)
+    eval_tf = build_transforms(False, img_size, gpu_aug)
+    val = FixedClassImageFolder(os.path.join(split_dir, "val"), classes, transform=eval_tf, **extra)
+    test = FixedClassImageFolder(os.path.join(split_dir, "test"), classes, transform=eval_tf, **extra)
 
     missing = {
         name: [c for c in classes if c not in os.listdir(os.path.join(split_dir, name))]

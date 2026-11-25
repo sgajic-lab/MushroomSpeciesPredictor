@@ -13,12 +13,21 @@ from model import load_checkpoint
 
 
 @torch.no_grad()
-def predict_all(model, loader, device):
-    """Return (logits, targets) for a whole loader."""
+def predict_all(model, loader, device, prep=None, amp=False, channels_last=False):
+    """Return (logits, targets) for a whole loader.
+
+    ``prep`` turns a loaded batch into model input on the device (used for
+    GPU-side normalisation); ``amp`` runs the model in float16 on CUDA."""
     model.eval()
     all_logits, all_targets = [], []
     for inputs, targets in loader:
-        all_logits.append(model(inputs.to(device, non_blocking=True)).float().cpu())
+        inputs = inputs.to(device, non_blocking=True)
+        if prep is not None:
+            inputs = prep(inputs)
+        if channels_last:
+            inputs = inputs.contiguous(memory_format=torch.channels_last)
+        with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=amp):
+            all_logits.append(model(inputs).float().cpu())
         all_targets.append(targets)
     return torch.cat(all_logits), torch.cat(all_targets)
 

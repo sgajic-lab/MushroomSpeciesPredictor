@@ -59,7 +59,11 @@ The training recipe:
   with only a slight hue shift.
 - **Best checkpoint and early stopping.** The best epoch by validation accuracy is saved
   to `checkpoints/best.pt`, and training stops early when validation stops improving.
-- **Mixed precision** on CUDA GPUs.
+- **Mixed precision** on CUDA GPUs, with channels-last memory layout for faster convolutions.
+- **Augmentation on the GPU.** On a CUDA machine, the data-loader workers only decode, crop and flip
+  each image. Rotation, color jitter, normalization and random erasing run on the GPU for the whole
+  batch, with separate random values for every image (`gpu_aug.py`). This keeps a small CPU from
+  holding back the GPU. Use `--aug cpu` to do everything on the CPU, as before.
 - **Optional time limit.** With `--time-limit HOURS`, the fine-tuning schedule is shortened to fit
   the budget, and training stops early if the next epoch wouldn't finish. Time is kept back for
   the final test evaluation.
@@ -95,6 +99,7 @@ predictions.
 | File | Purpose |
 |---|---|
 | `data.py` | Transforms, datasets (val/test share the train class indices), loaders, class weights |
+| `gpu_aug.py` | Batch augmentation on the GPU, with random values per image |
 | `model.py` | `ConvNet`, pretrained backbones, freezing, checkpoint save/load |
 | `train.py` | Training loop |
 | `evaluate.py` | Metrics, per-class report, confusion matrix |
