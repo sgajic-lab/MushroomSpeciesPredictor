@@ -21,6 +21,33 @@ from concurrent.futures import ProcessPoolExecutor
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tif", ".tiff", ".webp")
 SPLITS = ("train", "val", "test")
 
+# The Kaggle dataset combines several sources that use different names for the same
+# species (old name vs. current name after reclassification). Left as separate classes,
+# the model gets marked wrong for "confusing" a species with itself. Each folder on the
+# left is merged into the class on the right.
+SYNONYMS = {
+    "Lycoperdon pyriforme": "Apioperdon pyriforme",
+    "Armillaria tabescens": "Desarmillaria tabescens",
+    "Merulius tremellosus": "Phlebia tremellosa",
+    "Psathyrella candolleana": "Candolleomyces candolleanus",
+    "Clitocybe nuda": "Collybia nuda",
+    "Lepista nuda": "Collybia nuda",
+    "Gyromitra infula": "Paragyromitra infula",
+    "Boletus pulcherrimus": "Rubroboletus pulcherrimus",
+    "Boletus badius": "Imleria badia",
+    "Lactarius volemus": "Lactifluus volemus",
+    "Polyporus squamosus": "Cerioporus squamosus",
+}
+
+# Folders labelled with a genus or family instead of a species. They overlap with
+# real species classes, so they are left out.
+DROP = {
+    "Pleurotus": "genus, not a species",
+    "Chroogomphus": "genus, not a species",
+    "Clavariaceae": "family, not a species",
+    "Clavulinaceae": "family, not a species",
+}
+
 
 def split_class(files, ratio, rng):
     files = sorted(files)
@@ -63,6 +90,8 @@ def main():
     mode.add_argument("--link", action="store_true", help="symlink instead of copying (fast; Linux/macOS)")
     mode.add_argument("--resize", type=int, metavar="SIZE", help="shrink images to SIZE px (short side) as JPEG")
     ap.add_argument("--workers", type=int, default=os.cpu_count() or 1, help="processes for --resize")
+    ap.add_argument("--keep-names", action="store_true",
+                    help="don't merge synonym folders or drop non-species folders")
     args = ap.parse_args()
 
     if abs(sum(args.ratio) - 1) > 1e-6:
@@ -70,27 +99,49 @@ def main():
     if os.path.exists(args.out) and os.listdir(args.out):
         raise SystemExit(f"{args.out} already exists and is not empty; choose another --out")
 
-    classes = sorted(d for d in os.listdir(args.source) if os.path.isdir(os.path.join(args.source, d)))
+    folders = sorted(d for d in os.listdir(args.source) if os.path.isdir(os.path.join(args.source, d)))
+
+    # group source folders into classes, merging synonyms and dropping non-species folders
+    groups = {}
+    for folder in folders:
+        if not args.keep_names and folder in DROP:
+            print(f"Dropping {folder!r}: {DROP[folder]}")
+            continue
+        cls = folder if args.keep_names else SYNONYMS.get(folder, folder)
+        groups.setdefault(cls, []).append(folder)
+    for cls, members in groups.items():
+        if len(members) > 1:
+            print(f"Merging {' + '.join(repr(m) for m in members)} -> {cls!r}")
+
     totals = dict.fromkeys(SPLITS, 0)
     per_class = {}
     jobs = []
-    for cls in classes:
-        src_dir = os.path.join(args.source, cls)
-        files = [f for f in os.listdir(src_dir) if f.lower().endswith(IMAGE_EXTS)]
+    used = set()
+    for cls in sorted(groups):
+        # (folder, file) pairs, so files from merged folders can't clash
+        files = [(folder, f) for folder in groups[cls]
+                 for f in os.listdir(os.path.join(args.source, folder)) if f.lower().endswith(IMAGE_EXTS)]
         if not files:
             print(f"Skipping {cls!r}: no images")
             continue
         per_class[cls] = len(files)
         # seed per class so adding/removing a class doesn't reshuffle the others
         rng = random.Random(f"{args.seed}-{cls}")
-        for split, names in split_class(files, args.ratio, rng).items():
+        for split, pairs in split_class(files, args.ratio, rng).items():
             dst_dir = os.path.join(args.out, split, cls)
             os.makedirs(dst_dir, exist_ok=True)
-            for name in names:
-                src = os.path.abspath(os.path.join(src_dir, name))
-                dst = os.path.join(dst_dir, name)
+            for folder, name in pairs:
+                src = os.path.abspath(os.path.join(args.source, folder, name))
+                stem, ext = os.path.splitext(name)
+                ext = ".jpg" if args.resize else ext
+                dst = os.path.join(dst_dir, stem + ext)
+                n = 1
+                while dst in used:  # same file name in two merged folders
+                    dst = os.path.join(dst_dir, f"{stem}_{n}{ext}")
+                    n += 1
+                used.add(dst)
                 if args.resize:
-                    jobs.append((src, os.path.splitext(dst)[0] + ".jpg", args.resize))
+                    jobs.append((src, dst, args.resize))
                 elif args.link:
                     try:
                         os.symlink(src, dst)
@@ -98,7 +149,7 @@ def main():
                         raise SystemExit(f"Could not create a symlink ({e}). On Windows, run without --link.")
                 else:
                     shutil.copy2(src, dst)
-            totals[split] += len(names)
+            totals[split] += len(pairs)
 
     if jobs:
         print(f"Resizing {len(jobs)} images to {args.resize}px with {args.workers} processes...", flush=True)
